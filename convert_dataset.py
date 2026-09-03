@@ -205,7 +205,7 @@ for index, image_path in enumerate(image_files):
             for contour in contours:
 
                 # Remove tiny regions
-                if cv2.contourArea(contour) < 10:
+                if cv2.contourArea(contour) < 100:
                     continue
 
                 epsilon = (
