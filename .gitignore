@@ -10,3 +10,4 @@ dataset/raw_labels/
 debug5/
 *.cache
 *.pt
+soil_data/
