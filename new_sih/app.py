@@ -143,97 +143,72 @@ def get_dem_from_earth_engine(lat: float, lon: float) -> Dict[str, Any]:
         }
 
 def get_satellite_ndvi(lat: float, lon: float) -> Dict[str, Any]:
-    if not SENTINEL_HUB_CLIENT_ID or not SENTINEL_HUB_CLIENT_SECRET:
-        logger.info("Sentinel Hub credentials missing, returning mock data")
-        return {
-            "ndvi_mean": None,
-            "true_color_base64": None,
-            "source": "Sentinel-2 (mock, no credentials)",
-            "date": datetime.utcnow().isoformat()
-        }
-
     try:
-        from sentinelhub import (
-            SentinelHubRequest, DataCollection, MimeType, CRS, BBox, SHConfig
-        )
+        import ee
         import numpy as np
         import base64
         from PIL import Image as PILImage
 
-        config = SHConfig()
-        config.sh_client_id = SENTINEL_HUB_CLIENT_ID
-        config.sh_client_secret = SENTINEL_HUB_CLIENT_SECRET
+        ee.Initialize(project=EE_PROJECT_ID)
 
-        bbox = BBox(coords=[lon - 0.01, lat - 0.01, lon + 0.01, lat + 0.01], crs=CRS.WGS84)
-        time_interval = ("2026-06-01", "2026-09-01")
+        point = ee.Geometry.Point([lon, lat])
+        bbox = point.buffer(2000).bounds()
 
-        # NDVI request
-        ndvi_evalscript = """
-            function setup() {
-                return { input: ["B04", "B08"], output: { bands: 1, sampleType: "FLOAT32" } };
-            }
-            function evaluatePixel(sample) {
-                let ndvi = (sample.B08 - sample.B04) / (sample.B08 + sample.B04);
-                return [ndvi];
-            }
-        """
-        ndvi_request = SentinelHubRequest(
-            evalscript=ndvi_evalscript,
-            input_data=[SentinelHubRequest.input_data(
-                DataCollection.SENTINEL2_L2A,
-                time_interval=time_interval,
-                mosaicking_order="leastCC"
-            )],
-            responses=[SentinelHubRequest.output_response("default", MimeType.TIFF)],
-            bbox=bbox,
-            size=[128, 128],
-            config=config
+        collection = (
+            ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+            .filterBounds(bbox)
+            .filterDate("2026-01-01", "2026-09-07")
+            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 20))
+            .sort("CLOUDY_PIXEL_PERCENTAGE")
         )
-        ndvi_data = ndvi_request.get_data()
-        ndvi_mean = float(np.nanmean(ndvi_data[0]))
 
-        # True color image request (real satellite photo of the area)
-        truecolor_evalscript = """
-            function setup() {
-                return { input: ["B04", "B03", "B02"], output: { bands: 3 } };
-            }
-            function evaluatePixel(sample) {
-                return [2.5 * sample.B04, 2.5 * sample.B03, 2.5 * sample.B02];
-            }
-        """
-        truecolor_request = SentinelHubRequest(
-            evalscript=truecolor_evalscript,
-            input_data=[SentinelHubRequest.input_data(
-                DataCollection.SENTINEL2_L2A,
-                time_interval=time_interval,
-                mosaicking_order="leastCC"
-            )],
-            responses=[SentinelHubRequest.output_response("default", MimeType.PNG)],
-            bbox=bbox,
-            size=[512, 512],
-            config=config
-        )
-        image_data = truecolor_request.get_data()
-        image_array = np.clip(image_data[0], 0, 255).astype("uint8")
-        pil_img = PILImage.fromarray(image_array)
+        image = collection.first()
 
-        buffer = BytesIO()
-        pil_img.save(buffer, format="PNG")
-        image_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+        # Real NDVI at point
+        ndvi_image = image.normalizedDifference(["B8", "B4"])
+        ndvi_value = ndvi_image.reduceRegion(
+            reducer=ee.Reducer.mean(),
+            geometry=bbox,
+            scale=10
+        ).get("nd").getInfo()
 
-        logger.info(f"Got real NDVI {ndvi_mean:.3f} and true-color image for ({lat},{lon})")
+        # True color thumbnail (RGB)
+        viz_params = {"min": 0, "max": 3000, "bands": ["B4", "B3", "B2"]}
+        thumb_url = image.getThumbURL({
+            "min": 0,
+            "max": 3000,
+            "bands": ["B4", "B3", "B2"],
+            "region": bbox,
+            "dimensions": 512,
+            "format": "png"
+        })
+
+        thumb_resp = requests.get(thumb_url, timeout=30)
+        true_color_base64 = None
+
+        if thumb_resp.status_code == 200:
+            pil_img = PILImage.open(BytesIO(thumb_resp.content))
+            buffer = BytesIO()
+            pil_img.save(buffer, format="PNG")
+            true_color_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+            logger.info(f"Got real satellite image from GEE for ({lat},{lon})")
+
+        ndvi_mean = round(float(ndvi_value), 3) if ndvi_value is not None else None
+        logger.info(f"Got real NDVI {ndvi_mean} from GEE for ({lat},{lon})")
+
         return {
-            "ndvi_mean": round(ndvi_mean, 3),
-            "true_color_base64": image_base64,
-            "source": "Sentinel-2 (Planet Insights / Sentinel Hub)",
+            "ndvi_mean": ndvi_mean,
+            "true_color_base64": true_color_base64,
+            "source": "Sentinel-2 via Google Earth Engine",
             "date": datetime.utcnow().isoformat()
         }
+
     except Exception as e:
-        logger.warning(f"Sentinel Hub fetch failed: {e}. Using mock data.")
+        logger.warning(f"GEE satellite fetch failed: {e}. Using mock data.")
         return {
             "ndvi_mean": None,
             "true_color_base64": None,
-            "source": "Sentinel-2 (mock fallback, fetch failed)",
+            "source": "Sentinel-2 (mock fallback)",
             "date": datetime.utcnow().isoformat()
         }
 
