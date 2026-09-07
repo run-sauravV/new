@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+runs/
+
+dataset/raw_images/
+dataset/raw_labels/
+debug5/
+*.cache
+*.pt
+soil_data/
